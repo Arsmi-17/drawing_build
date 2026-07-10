@@ -13,3 +13,7 @@
 /Build/*.js.br
   Content-Encoding: br
   Content-Type: application/javascript
+
+/Build/*.symbols.json.br
+  Content-Encoding: br
+  Content-Type: application/octet-stream
