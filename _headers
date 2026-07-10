@@ -1,0 +1,11 @@
+/Build/*.framework.js.br
+  Content-Type: application/javascript
+
+/Build/*.loader.js
+  Content-Type: application/javascript
+
+/Build/*.wasm.br
+  Content-Type: application/wasm
+
+/Build/*.data.br
+  Content-Type: application/octet-stream
