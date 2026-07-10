@@ -15,8 +15,16 @@
         overflow: hidden; background: #000;
         overscroll-behavior: none; -webkit-tap-highlight-color: transparent;
       }
-      #unity-container { position: absolute; inset: 0; width: 100%; height: 100%; }
-      #unity-canvas { display: block; width: 100%; height: 100%; background: #000; }
+      /* Full-bleed, overriding the stock template's fixed 960x600 + grey canvas. */
+      #unity-container, .unity-desktop, .unity-mobile {
+        position: fixed !important; inset: 0 !important; transform: none !important;
+        width: 100% !important; height: 100% !important;
+        max-width: none !important; max-height: none !important; margin: 0 !important;
+      }
+      #unity-canvas {
+        display: block !important; width: 100% !important; height: 100% !important;
+        background: #000 !important;
+      }
       #unity-footer { display: none !important; }
       #unity-loading-bar {
         position: absolute; left: 50%; top: 50%;
@@ -44,10 +52,38 @@
       var unityInstance = null;
       var desiredMuted = false;
 
+      // ---- Platform bridge helpers -----------------------------------------
       function postToParent(m){ try{ if(window.parent && window.parent!==window) window.parent.postMessage(m,"*"); }catch(e){} }
       function reportProgress(p){ postToParent({ type:"gamehub:unity:progress", progress:p, ts:Date.now(), version:1 }); }
       function reportReady(){ postToParent({ type:"gamehub:unity:ready", ts:Date.now(), version:1 }); }
       function reportError(msg){ postToParent({ type:"gamehub:unity:error", error:String(msg||"Unity load failed"), ts:Date.now(), version:1 }); }
+
+      // ---- The fix: explicitly resize the WebGL drawing buffer -------------
+      // matchWebGLToCanvasSize alone is not reliable across a fullscreen
+      // transition (and fullscreenchange does NOT fire inside a cross-origin
+      // iframe), so we compute the viewport size and call setCanvasSize()
+      // ourselves. This is what prevents the black/grey screen on enter/exit.
+      function fitCanvas(){
+        try{
+          if(!canvas) return;
+          var w = Math.max(1, Math.floor(window.innerWidth || document.documentElement.clientWidth || 1));
+          var h = Math.max(1, Math.floor(window.innerHeight || document.documentElement.clientHeight || 1));
+          canvas.style.width = "100%";
+          canvas.style.height = "100%";
+          canvas.style.display = "block";
+          var dpr = Math.max(1, window.devicePixelRatio || 1);
+          if(unityInstance && unityInstance.Module && typeof unityInstance.Module.setCanvasSize === "function"){
+            unityInstance.Module.setCanvasSize(Math.floor(w*dpr), Math.floor(h*dpr));
+          }
+        }catch(e){}
+      }
+      // A fullscreen enter/exit settles asynchronously; keep re-fitting for
+      // ~1.2s across animation frames so the buffer lands on the final size.
+      function scheduleFit(){
+        var start = Date.now();
+        var raf = window.requestAnimationFrame || function(cb){ return setTimeout(cb, 16); };
+        (function step(){ fitCanvas(); if(Date.now()-start < 1200) raf(step); })();
+      }
 
       function applyMuted(muted){
         desiredMuted = !!muted;
@@ -64,11 +100,24 @@
           var bridge = window.GameHubBridge;
           if(!bridge || typeof bridge.on!=="function") return;
           bridge.on("set_mute", function(p){ applyMuted(p && p.muted); });
-          bridge.on("set_fullscreen", function(){
-            [60,260,760].forEach(function(d){ setTimeout(function(){ try{ window.dispatchEvent(new Event("resize")); }catch(e){} }, d); });
-          });
+          // Platform tells us fullscreen changed -> refit the drawing buffer.
+          bridge.on("set_fullscreen", scheduleFit);
         }catch(e){}
       }
+
+      // Signals that actually reach a cross-origin iframe on resize/fullscreen.
+      window.addEventListener("resize", fitCanvas);
+      window.addEventListener("orientationchange", scheduleFit);
+      document.addEventListener("fullscreenchange", scheduleFit);      // standalone / same-origin
+      document.addEventListener("webkitfullscreenchange", scheduleFit);
+      try{
+        if(typeof ResizeObserver !== "undefined"){
+          new ResizeObserver(fitCanvas).observe(document.documentElement);
+        }
+      }catch(e){}
+      // Recover from a WebGL context loss (rapid fullscreen toggles).
+      canvas.addEventListener("webglcontextlost", function(e){ try{ e.preventDefault(); }catch(_){} });
+      canvas.addEventListener("webglcontextrestored", scheduleFit);
 
       function unityShowBanner(msg, type){
         var b = document.querySelector("#unity-warning");
@@ -112,6 +161,8 @@
           document.querySelector("#unity-loading-bar").style.display = "none";
           applyMuted(desiredMuted);
           wirePlatformControls();
+          fitCanvas();
+          scheduleFit();      // settle the initial size
           reportReady();
         }).catch(function(message){
           reportError(message);
