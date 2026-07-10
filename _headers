@@ -1,11 +1,15 @@
-/Build/*.framework.js.br
+/Build/*.js.br
   Content-Type: application/javascript
-
-/Build/*.loader.js
-  Content-Type: application/javascript
+  Content-Encoding: br
 
 /Build/*.wasm.br
   Content-Type: application/wasm
+  Content-Encoding: br
 
 /Build/*.data.br
   Content-Type: application/octet-stream
+  Content-Encoding: br
+
+/Build/*.symbols.json.br
+  Content-Type: application/octet-stream
+  Content-Encoding: br
