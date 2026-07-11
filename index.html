@@ -52,6 +52,17 @@
       var unityInstance = null;
       var desiredMuted = false;
 
+      // Cap render DPR to 1 on mobile / coarse-pointer devices (2 on desktop).
+      // A full-DPR fullscreen framebuffer on a phone is a top cause of WebGL
+      // context loss when reallocated during active rendering.
+      function ghMaxDpr(){
+        var coarse = false;
+        try{ coarse = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches); }catch(e){}
+        var mobileUa = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+        return (coarse || mobileUa) ? 1 : 2;
+      }
+      function ghDpr(){ return Math.min(ghMaxDpr(), Math.max(1, window.devicePixelRatio || 1)); }
+
       // ---- Platform bridge helpers -----------------------------------------
       function postToParent(m){ try{ if(window.parent && window.parent!==window) window.parent.postMessage(m,"*"); }catch(e){} }
       function reportProgress(p){ postToParent({ type:"gamehub:unity:progress", progress:p, ts:Date.now(), version:1 }); }
@@ -63,6 +74,7 @@
       // transition (and fullscreenchange does NOT fire inside a cross-origin
       // iframe), so we compute the viewport size and call setCanvasSize()
       // ourselves. This is what prevents the black/grey screen on enter/exit.
+      var __lastFitW = 0, __lastFitH = 0;
       function fitCanvas(){
         try{
           if(!canvas) return;
@@ -71,18 +83,28 @@
           canvas.style.width = "100%";
           canvas.style.height = "100%";
           canvas.style.display = "block";
-          var dpr = Math.max(1, window.devicePixelRatio || 1);
+          var dpr = ghDpr();
+          var tw = Math.floor(w*dpr), th = Math.floor(h*dpr);
+          // CRITICAL: only reallocate the buffer on a real size change. Calling
+          // setCanvasSize on every resize/fullscreen event thrashes the
+          // framebuffer and *causes* the context loss (black screen + reboot).
+          if(tw === __lastFitW && th === __lastFitH) return;
+          __lastFitW = tw; __lastFitH = th;
           if(unityInstance && unityInstance.Module && typeof unityInstance.Module.setCanvasSize === "function"){
-            unityInstance.Module.setCanvasSize(Math.floor(w*dpr), Math.floor(h*dpr));
+            unityInstance.Module.setCanvasSize(tw, th);
           }
         }catch(e){}
       }
-      // A fullscreen enter/exit settles asynchronously; keep re-fitting for
-      // ~1.2s across animation frames so the buffer lands on the final size.
+      // Re-fit across animation frames until the size stops changing. Coalesced
+      // into ONE loop with a moving deadline so a burst of events can't spawn
+      // overlapping loops.
+      var __fitDeadline = 0, __fitRunning = false;
       function scheduleFit(){
-        var start = Date.now();
+        __fitDeadline = Date.now() + 1000;
+        if(__fitRunning) return;
+        __fitRunning = true;
         var raf = window.requestAnimationFrame || function(cb){ return setTimeout(cb, 16); };
-        (function step(){ fitCanvas(); if(Date.now()-start < 1200) raf(step); })();
+        (function step(){ fitCanvas(); if(Date.now() < __fitDeadline) raf(step); else __fitRunning = false; })();
       }
 
       function applyMuted(muted){
@@ -115,8 +137,21 @@
           new ResizeObserver(fitCanvas).observe(document.documentElement);
         }
       }catch(e){}
-      // Recover from a WebGL context loss (rapid fullscreen toggles).
-      canvas.addEventListener("webglcontextlost", function(e){ try{ e.preventDefault(); }catch(_){} });
+      // Recover from a WebGL context loss. Unity cannot rebuild its GPU
+      // resources on the fly, so the only real recovery is a reload. Guard with
+      // a short-lived flag so a persistently-failing device can't reload-loop.
+      canvas.addEventListener("webglcontextlost", function(e){
+        try{ e.preventDefault(); }catch(_){}
+        scheduleFit();
+        try{
+          var last = Number(sessionStorage.getItem("gh_ctx_reload") || 0);
+          if(Date.now() - last > 15000){
+            sessionStorage.setItem("gh_ctx_reload", String(Date.now()));
+            unityShowBanner("Rendering was reset — reloading…", "warning");
+            setTimeout(function(){ try{ location.reload(); }catch(_){} }, 600);
+          }
+        }catch(_){}
+      });
       canvas.addEventListener("webglcontextrestored", scheduleFit);
 
       function unityShowBanner(msg, type){
@@ -141,6 +176,9 @@
         productVersion: "1.0",
         showBanner: unityShowBanner,
         matchWebGLToCanvasSize: true,
+        // Cap the framebuffer DPR (1 on mobile, 2 on desktop) to avoid huge
+        // allocations on fullscreen, a top cause of WebGL context loss.
+        devicePixelRatio: ghDpr(),
       };
 
       if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
